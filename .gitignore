@@ -8,6 +8,9 @@ _pycache_/
 *.pyo
 *.pyd
 
+# Arquivos com chaves da API
+.streamlit/
+
 # Arquivos temporários de build
 *.log
 *.sqlite3
