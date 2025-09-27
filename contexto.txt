@@ -1,0 +1,59 @@
+📌 CONTEXTO UNIFICADO - PROCESSOS OPERACIONAIS
+
+🎭 ATORES ENVOLVIDOS
+- Beneficiário (Cliente/Paciente): Usuário que solicita serviços, exames, atualizações cadastrais, 2ª via de boletos, agendamentos ou correções.
+- Atendimento: Colaboradores responsáveis por coletar documentos, registrar protocolos, entregar comprovantes, entrar em contato com clientes e atualizar sistemas (ERP, CRM, Excel etc.).
+- Cadastro: Responsável por validar se documentos e informações estão corretos e solicitar correções.
+- Financeiro: Responsável por aplicar descontos, validar cobranças indevidas e atualizar pagamentos.
+- Auditoria: Setor que analisa solicitações de exames/procedimentos para autorizações.
+
+-------------------------------------------------
+📂 PRINCIPAIS PROCESSOS
+
+1. TROCA DE TITULARIDADE
+- Processo realizado presencialmente.
+- Documentos exigidos: RG, CPF, certidão de óbito ou comprovante de endereço.
+- Necessária a presença de titulares (atual e futuro).
+- Etapas: Solicitação → Impressão → Assinatura → Cópias → Registro → Protocolo → Cadastro → Validação → Correções (se necessário).
+
+2. SOLICITAÇÃO DE AUTORIZAÇÃO DE EXAMES
+- Canais: WhatsApp ou presencial.
+- Informações exigidas: nome, data de nascimento, foto do pedido médico.
+- Etapas: Fornecer dados → Registrar atendimento → Decidir se precisa de auditoria → Retorno com protocolo, prazos e status → Informar beneficiário.
+- Se não houver cobertura: informar negativa.
+- Se houver cobertura: fornecer número da guia.
+
+3. EMISSÃO DE 2ª VIA DE BOLETO
+- Canal: App ou site.
+- Etapas: Acessar plataforma → Selecionar menu financeiro → Escolher competência → Gerar segunda via.
+- Processo feito diretamente pelo beneficiário (self-service).
+
+4. PLANO DE MAIORIDADE
+- Processo realizado presencialmente.
+- Documentos exigidos: RG, CPF, comprovante de matrícula/frequência.
+- Etapas: Solicitação → Cópias → Registro → Protocolo → Cadastro → Validação → Correções.
+
+5. COBRANÇA INDEVIDA
+- Canais: Presencial, WhatsApp, e-mail.
+- Etapas: Solicitar dados → Registrar atendimento → Protocolo → Enviar para contas médicas → Validar cobrança.
+- Se indevida: enviar comprovante e aplicar desconto (tesouraria ou financeiro).
+- Se não indevida: informar beneficiário.
+
+6. ATUALIZAÇÃO CADASTRAL
+- Canal: WhatsApp.
+- Beneficiário envia dados pessoais (CPF, endereço etc.) + documentos.
+- Atendimento confere dados → Atualiza via CRM ou informa necessidade de correção.
+
+7. AGENDAMENTO DE CONSULTAS
+- Canais: Aplicativo (self-service) ou ligação/WhatsApp (via atendimento).
+- Via aplicativo: Buscar agenda → Visualizar vagas → Reservar → Confirmar.
+- Via atendimento: Beneficiário fornece dados → Atendimento verifica disponibilidade → Informa opções → Confirma e agenda via CRM.
+
+-------------------------------------------------
+📌 REGRAS GERAIS
+- Processos podem ser presenciais, online (app/site), WhatsApp ou telefone.
+- Auditoria é obrigatória para determinados exames/procedimentos.
+- Cadastro valida obrigatoriamente a documentação enviada.
+- Protocolos e registros devem ser feitos em ERP/CRM/Excel.
+- Comunicação com beneficiário ocorre por WhatsApp, telefone, e-mail ou presencialmente.
+- Todos os fluxos possuem checkpoints de validação: se correto, segue; se incorreto, retorna ao beneficiário.
