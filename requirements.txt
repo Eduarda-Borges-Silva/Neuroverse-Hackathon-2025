@@ -1,11 +1,35 @@
-streamlit==1.38.0
-langchain==0.3.0
-langchain-community==0.3.0
-langchain-groq==0.2.0
-langchain-openai==0.2.0
-python-dotenv==1.0.1
-beautifulsoup4==4.12.3
-pypdf==5.0.0
-unstructured==0.15.13
-fake_useragent==1.5.1
-youtube_transcript_api==0.6.2
+# --- App base / UI ---
+streamlit>=1.36.0
+pandas>=2.2.2
+numpy>=1.26.0
+
+# --- LangChain + provedores usados ---
+langchain>=0.2.10
+langchain-groq>=0.1.3
+langchain-google-genai>=1.0.3
+
+# opcionais (você importa sob try/except)
+langchain-openai>=0.1.14         # opcional: provedores OpenAI-compatíveis
+langchain-community>=0.2.10      # opcional: HuggingFaceEndpoint (texto-LLM)
+
+# --- Google Calendar / API ---
+google-api-python-client>=2.143.0
+google-auth>=2.35.0
+google-auth-oauthlib>=1.2.1
+google-auth-httplib2>=0.2.0
+httplib2>=0.22.0
+requests>=2.32.3
+python-dateutil>=2.9.0.post0
+
+# --- OCR / PDF ---
+pytesseract>=0.3.13              # requer Tesseract instalado no sistema (CLI)
+Pillow>=10.3.0
+pdfplumber>=0.11.4
+pdfminer.six>=20231228
+
+# --- Planilhas (CSV/XLS/XLSX) ---
+openpyxl>=3.1.5                  # leitura de .xlsx
+xlrd>=2.0.1                      # leitura de .xls (se precisar)
+
+# --- Utilitários diversos (caso faltem via dependências) ---
+tqdm>=4.66.4

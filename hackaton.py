@@ -7,7 +7,8 @@ import tempfile
 import unicodedata
 import string  # necessário p/ gerar tokens
 from pathlib import Path
-from datetime import datetime
+from datetime import datetime, date, timedelta
+
 
 import googleapiclient
 import streamlit as st
@@ -104,7 +105,7 @@ if 'memoria_upload' not in st.session_state:
     st.session_state['memoria_upload'] = ConversationBufferMemory()
 if 'auditorias_pendentes' not in st.session_state:
     st.session_state['auditorias_pendentes'] = []
-
+    
 # ----------------------------
 # Banco de Dados (SQLite)
 # ----------------------------
@@ -589,29 +590,26 @@ def _cria_cliente_chat(prov_info, modelo, api_key):
         return chat_cls(model=modelo, api_key=api_key, **extras)
 
 def monta_chain_unificada(provedor: str, modelo: str, api_key: str, tiposArquivo: str, arquivo):
-    doc_texto = carrega_arquivos(tiposArquivo, arquivo) if tiposArquivo else ""
+    # ⚠️ MODO ESTRITO: ignora uploads/URLs e usa SOMENTE o contexto.txt
+    doc_texto = ""  # ignorado de propósito
     contexto_raiz = carrega_contexto_raiz("contexto.txt")
 
-    system_message = f"""Você é um assistente amigável chamado Oráculo.
+    system_message = f"""Você é o Oráculo.
 
-Você possui acesso a DUAS fontes de informação:
+    REGRAS OBRIGATÓRIAS (MODO ESTRITO):
+    1) Você SÓ pode responder com base em trechos que estejam explícitos no CONTEXTO_FIXO abaixo.
+    2) Se a pergunta NÃO puder ser respondida usando informação presente no CONTEXTO_FIXO, responda EXATAMENTE:
+    "❌ Não encontrei essa informação no contexto.txt."
+    3) Não invente, não complete lacunas e não use conhecimento externo, normas gerais, bom senso ou experiência prévia.
+    4) Sempre inclua ao final uma seção: 
+    "Trechos do contexto usados:" listando até 3 citações LITERAIS (curtas) do CONTEXTO_FIXO que embasaram a resposta.
+    5) Se a pergunta pedir algo fora do escopo, responda a mesma mensagem do item 2.
+    6) Sempre substitua o caractere "$" por "S" na saída final.
 
-1) **ARQUIVO DE CONTEXTO FIXO (raiz do projeto)**:
-### CONTEXTO_FIXO
-{contexto_raiz}
-###
-
-2) **CONTEÚDO CARREGADO PELO USUÁRIO** (tipo: {tiposArquivo or '-'}):
-### DOCUMENTO_USUARIO
-{doc_texto}
-###
-
-Instruções:
-- Priorize coerência entre CONTEXTO_FIXO e DOCUMENTO_USUARIO. Se houver conflito explícito, peça orientação ao usuário.
-- Utilize as informações fornecidas para basear suas respostas; não invente dados fora do contexto.
-- Sempre que houver um "$" na sua saída, substitua por "S".
-- Se aparecer "Just a moment...Enable JavaScript and cookies to continue", sugira recarregar o Oráculo.
-"""
+    ### CONTEXTO_FIXO (única fonte permitida)
+    {contexto_raiz}
+    ### FIM DO CONTEXTO_FIXO
+    """
     template = ChatPromptTemplate.from_messages([
         ('system', system_message),
         ('placeholder', '{chat_history}'),
@@ -619,6 +617,7 @@ Instruções:
     ])
     chat = _cria_cliente_chat(st.session_state['provedores'][provedor], modelo, api_key)
     return template | chat
+
 
 def monta_chain_upload(provedor: str, modelo: str, api_key: str, tiposArquivo: str, arquivo, incluir_contexto_raiz: bool):
     doc_texto = carrega_arquivos(tiposArquivo, arquivo)
@@ -706,25 +705,22 @@ def extrair_texto_pedido(pedido_file) -> str:
 
 def extrair_procedimentos_do_pedido(texto_ocr: str) -> str:
     """
-    Pega o texto bruto do OCR e retorna somente a seção de exames/procedimentos.
-    Heurística:
-      - começa quando aparecer uma linha com palavras-chave de INÍCIO (ex.: "exames", "procedimentos", "solicito"...)
-      - termina quando aparecer uma linha com palavras-chave de FIM (ex.: "CRM", "Dr", "Assinatura", "Data"...)
+    Extrai a lista de exames/procedimentos do texto OCR.
+    Funciona com e sem cabeçalho explícito ("Exames", "Procedimentos"...).
     """
     if not texto_ocr:
         return ""
 
-    import unicodedata
+    import unicodedata, re
     def norm(s: str) -> str:
-        s = s.lower().strip()
+        s = (s or "").strip().lower()
         s = ''.join(ch for ch in unicodedata.normalize('NFD', s) if unicodedata.category(ch) != 'Mn')
         return s
 
     START_KEYS = {
         "exames", "exame", "procedimentos", "procedimento",
-        "exames laboratoriais", "laboratoriais", "laboratorio", "laboratorial",
-        "solicito", "solicitacao", "solicitação", "solicitados", "solicitado",
-        "itens", "pedidos"
+        "solicito", "solicitacao", "solicitação", "solicitados", "itens",
+        "pedido de exames", "requisicao", "requisição", "solicitacao de exames"
     }
     STOP_KEYS = {
         "crm", "dr.", "dr ", "dra", "assinatura", "carimbo",
@@ -732,41 +728,69 @@ def extrair_procedimentos_do_pedido(texto_ocr: str) -> str:
         "data:", "observacoes", "observações", "diagnostico", "diagnóstico",
         "cid", "conselho", "crm:"
     }
+    HEADER_KEYS = {"nome:", "paciente:", "beneficiario", "data de nascimento", "cartao", "plano", "matricula"}
 
-    linhas = texto_ocr.splitlines()
+    # linha que "parece" item de exame: modalidade + descrição, ou presença de hífen/separadores
+    ITEM_REGEX = re.compile(
+        r"^\s*(TC|TOMOGRAFIA|RM|RESSONANCIA|RX|RAIO\s*X|USG|ULTRASSOM|ECO|ECODOPPLER|MAMO|HOLTER|MAPA|EEG|EMG|ENDOSCOPIA|COLONO)\b",
+        re.IGNORECASE
+    )
+
+    linhas_raw = texto_ocr.splitlines()
+    linhas = [l.strip() for l in linhas_raw if l.strip()]
     capturando = False
     coletadas = []
 
     for raw in linhas:
         n = norm(raw)
 
-        # decide começar
-        if not capturando:
-            if any(k in n for k in START_KEYS):
-                capturando = True
-                # pula a linha de título, normalmente não é um item
-                continue
-            else:
-                continue
+        # Começo "clássico": cabeçalho de seção
+        if not capturando and any(k in n for k in START_KEYS):
+            capturando = True
+            continue
 
-        # já capturando → ver se é hora de parar
+        # Começo "heurístico": linha que parece um item de exame
+        if not capturando and (ITEM_REGEX.search(raw) or (" - " in raw) or (" – " in raw) or ("—" in raw)):
+            # Evita começar em cabeçalho (nome, data, etc.)
+            if not any(h in n for h in HEADER_KEYS):
+                capturando = True
+
+        if not capturando:
+            continue
+
+        # Hora de parar?
         if any(k in n for k in STOP_KEYS):
             break
 
-        # limpeza simples de ruído e bullets
-        limpo = raw.strip().lstrip("-•–—").strip()
-        if not limpo or len(limpo) < 3 or norm(limpo) in START_KEYS:
+        # Limpeza de bullets e linhas muito curtas
+        limpo = raw.lstrip("-•–—:·").strip()
+        if len(norm(limpo)) < 2:
             continue
 
         coletadas.append(limpo)
-
-        # trava de segurança para não pegar o documento inteiro
-        if len(coletadas) > 100:
+        if len(coletadas) > 200:
             break
 
-    texto = "\n".join(coletadas)
+    # Fallback: se não encontrou nada, tenta pegar as 5–15 linhas mais “significativas”
+    if not coletadas:
+        candidatos = []
+        for raw in linhas:
+            n = norm(raw)
+            if any(h in n for h in HEADER_KEYS):  # pula cabeçalhos comuns
+                continue
+            if any(k in n for k in STOP_KEYS):     # pula rodapés/assinatura
+                continue
+            if ITEM_REGEX.search(raw) or (" - " in raw) or (" – " in raw):
+                candidatos.append(raw.strip())
+        if not candidatos:
+            # como último recurso, pega as linhas mais longas (prováveis descrições)
+            candidatos = sorted(linhas, key=lambda s: len(s), reverse=True)[:10]
+        coletadas = candidatos
+
+    texto = "\n".join(dict.fromkeys(coletadas))  # remove duplicatas preservando ordem
     texto = re.sub(r"\n{3,}", "\n\n", texto)
     return texto.strip()
+
 
 # ----------------------------
 # Cruzamento Pedido x Banco
@@ -796,7 +820,6 @@ def sidebar_modelos():
         usar_chave_salva = st.checkbox('Usar chave salva automaticamente', value=bool(default_key))
         if usar_chave_salva and default_key:
             api_key = default_key
-            st.caption('✅ Usando chave salva em `st.secrets`/memória.')
         else:
             api_key = st.text_input('API Key', type='password')
 
@@ -847,103 +870,15 @@ def sidebar_modelos():
 # ----------------------------
 def pagina_upload():
     st.header('📎 Upload de Arquivos / URLs', divider=True)
-    up_tabs = st.tabs(["Envio & Chat do Upload", "Autorização de Exames", "🗄️ Banco de Dados"])
 
-    # --- SUBTAB 1: Envio & Chat do Upload ---
+    # Agora só duas sub-abas
+    up_tabs = st.tabs(["Autorização de Exames", "🗄️ Banco de Dados"])
+
+    # --- SUBTAB 1: Autorização de Exames (consulta SOMENTE o Banco) ---
     with up_tabs[0]:
-        tipo = st.selectbox('Tipo de entrada', TIPOS_ARQUIVOS, key='upload_tipo_select')
-        arquivo = None
-        if tipo == 'Site':
-            arquivo = st.text_input('URL do site:', key='upload_site')
-        elif tipo == 'Link Youtube':
-            arquivo = st.text_input('URL do vídeo:', key='upload_yt')
-        elif tipo == '.PDF':
-            arquivo = st.file_uploader('Arquivo `.PDF`', type=['pdf'], key='upload_pdf')
-        elif tipo == '.CSV':
-            arquivo = st.file_uploader('Arquivo `.CSV`', type=['csv'], key='upload_csv')
-        elif tipo == '.TXT':
-            arquivo = st.file_uploader('Arquivo `.TXT`', type=['txt'], key='upload_txt')
-
-        col_s, col_i = st.columns([1,1])
-        with col_s:
-            if st.button("Salvar entrada para o Chat principal", use_container_width=True):
-                st.session_state['upload'] = {'tipo': tipo, 'arquivo': arquivo}
-                st.success("Entrada salva para o Chat principal!")
-        with col_i:
-            if st.button("Limpar entrada salva", use_container_width=True):
-                st.session_state['upload'] = {'tipo': None, 'arquivo': None}
-                st.success("Entrada salva limpa.")
-
-        saved = st.session_state.get('upload', {})
-        st.caption(f"Salvo p/ Chat principal → tipo={saved.get('tipo') or '-'} | anexado={'sim' if saved.get('arquivo') else 'não'}")
-
-        st.markdown("---")
-        st.subheader("💬 Chat do Upload (isolado)", divider=True)
-
-        sel = st.session_state.get('selecionado')
-        if not sel:
-            st.info("Selecione um provedor/modelo na **sidebar**.")
-            st.stop()
-
-        incluir_ctx = st.checkbox("Incluir também o contexto.txt (raiz) neste chat", value=False)
-
-        if st.button("Inicializar Chat do Upload", use_container_width=True):
-            if not sel.get('api_key'):
-                st.error("API Key vazia. Informe/salve na **sidebar**.")
-            else:
-                st.session_state['chain_upload'] = monta_chain_upload(
-                    provedor=sel['provedor'],
-                    modelo=sel['modelo'],
-                    api_key=sel['api_key'],
-                    tiposArquivo=tipo,
-                    arquivo=arquivo,
-                    incluir_contexto_raiz=incluir_ctx
-                )
-                st.success("Chat do Upload inicializado!")
-
-        chain_upload = st.session_state.get('chain_upload')
-        if chain_upload is not None:
-            mem_up = st.session_state['memoria_upload']
-            for msg in mem_up.buffer_as_messages:
-                st.chat_message(msg.type).markdown(msg.content)
-
-            entrada = st.chat_input("Converse sobre o arquivo/URL deste tab (chat isolado)")
-            if entrada:
-                st.chat_message('human').markdown(entrada)
-                caixa_ai = st.chat_message('ai')
-                try:
-                    resposta = caixa_ai.write_stream(chain_upload.stream({
-                        'input': entrada,
-                        'chat_history': mem_up.buffer_as_messages
-                    }))
-                except Exception:
-                    resp = chain_upload.invoke({
-                        'input': entrada,
-                        'chat_history': mem_up.buffer_as_messages
-                    })
-                    resposta = getattr(resp, 'content', resp)
-                    caixa_ai.markdown(resposta)
-
-                mem_up.chat_memory.add_user_message(entrada)
-                mem_up.chat_memory.add_ai_message(resposta)
-
-            c1, c2 = st.columns(2)
-            with c1:
-                if st.button("Limpar histórico (Chat do Upload)", use_container_width=True):
-                    st.session_state['memoria_upload'] = ConversationBufferMemory()
-                    st.success("Histórico do chat do upload limpo.")
-            with c2:
-                if st.button("Reinicializar Chat do Upload", use_container_width=True):
-                    st.session_state.pop('chain_upload', None)
-                    st.success("Reinicialize clicando em 'Inicializar Chat do Upload'.")
-
-    # --- SUBTAB 2: Autorização de Exames (consulta SOMENTE o Banco)
-    with up_tabs[1]:
-        st.write("Envie o **pedido** (PDF/PNG/JPG). A decisão consulta **somente** o banco (carregue a planilha no subtab 🗄️ Banco de Dados).")
+        st.write("Envie o **pedido** (PDF/PNG/JPG). A decisão consulta **somente** o banco (carregue a planilha na aba 🗄️ Banco de Dados).")
 
         pedido_file = st.file_uploader("Pedido de exame/procedimento (PDF/PNG/JPG)", type=['pdf', 'png', 'jpg', 'jpeg'])
-        paciente = st.text_input("Paciente (opcional):")
-        doc_paciente = st.text_input("Documento/CPF (opcional):")
 
         if st.button("▶️ Processar Pedido", use_container_width=True):
             if pedido_file is None:
@@ -953,14 +888,14 @@ def pagina_upload():
                 texto_ocr = extrair_texto_pedido(pedido_file)
 
                 # 1.1) valida se houve erro de OCR
-                if texto_ocr.startswith("(!) "):
+                if isinstance(texto_ocr, str) and texto_ocr.startswith("(!) "):
                     st.error(texto_ocr)
                     st.stop()
 
                 # 1.2) manter apenas a seção de exames/procedimentos
                 texto_pedido = extrair_procedimentos_do_pedido(texto_ocr)
 
-                # *** VALIDAÇÃO NOVA: documento sem seção de exames/procedimentos ***
+                # valida documento sem seção de exames
                 if not texto_pedido or texto_pedido.strip() == "" or len(texto_pedido.splitlines()) == 0:
                     st.error("❌ Documento inválido para autorização: não encontramos uma seção de **exames/procedimentos** no arquivo enviado.")
                     st.info("Dica: envie um pedido médico contendo a lista de exames/procedimentos solicitados.")
@@ -982,17 +917,16 @@ def pagina_upload():
                         f"Data: {datetime.now().strftime('%d/%m/%Y %H:%M')}",
                         "Motivo: Procedimento(s) não encontrados no Rol (banco de dados)."
                     ]
-                    if paciente: linhas.append(f"Paciente: {paciente}")
-                    if doc_paciente: linhas.append(f"Documento: {doc_paciente}")
                     texto_na = "\n".join(linhas)
                     st.error("❌ Não autorizado: procedimento(s) não encontrados no banco.")
                     st.download_button("⬇️ Baixar não autorização", data=texto_na.encode("utf-8"),
                                        file_name=f"nao_autorizado_{codigo_na}.txt", mime="text/plain")
+
                 else:
                     st.subheader("Procedimentos identificados (Banco)")
                     st.dataframe(df_res, use_container_width=True)
 
-                    # Caminho B: encontrado, mas há item(es) não elegíveis => NÃO AUTORIZADO
+                    # B: há itens não elegíveis => NÃO AUTORIZADO
                     nao_elegiveis = df_res[df_res['elegivel'] == False]
                     if not nao_elegiveis.empty:
                         codigo_na = gerar_token("NAO-AUT")
@@ -1005,15 +939,13 @@ def pagina_upload():
                         ]
                         for _, r in nao_elegiveis.iterrows():
                             linhas.append(f"- {r.get('codigo') or '-'} | {r.get('procedimento') or '-'}")
-                        if paciente: linhas.append(f"\nPaciente: {paciente}")
-                        if doc_paciente: linhas.append(f"Documento: {doc_paciente}")
                         texto_na = "\n".join(linhas)
                         st.error("❌ Não autorizado: há procedimento(s) não elegíveis no Rol.")
                         st.download_button("⬇️ Baixar não autorização", data=texto_na.encode("utf-8"),
                                            file_name=f"nao_autorizado_{codigo_na}.txt", mime="text/plain")
 
                     else:
-                        # Caminho C: todos elegíveis -> avaliar auditoria
+                        # C: todos elegíveis -> avaliar auditoria
                         precisa_auditoria = df_res['auditoria'].fillna(False).any()
 
                         if not precisa_auditoria:
@@ -1021,14 +953,9 @@ def pagina_upload():
                             linhas = [
                                 "AUTORIZAÇÃO AUTOMÁTICA",
                                 f"Código: {codigo_aut}",
-                                f"Data: {datetime.now().strftime('%d/%m/%Y %H:%M')}"
+                                f"Data: {datetime.now().strftime('%d/%m/%Y %H:%M')}",
+                                "\nMotivo: Procedimentos elegíveis e sem exigência de auditoria conforme Rol (banco)."
                             ]
-                            if paciente: linhas.append(f"Paciente: {paciente}")
-                            if doc_paciente: linhas.append(f"Documento: {doc_paciente}")
-                            linhas.append("\nProcedimentos autorizados:")
-                            for _, r in df_res.iterrows():
-                                linhas.append(f"- {r.get('codigo') or '-'} | {r.get('procedimento') or '-'} (sem auditoria)")
-                            linhas.append("\nMotivo: Procedimentos elegíveis e sem exigência de auditoria conforme Rol (banco).")
                             texto_aut = "\n".join(linhas)
                             st.success(f"✅ Autorizado automaticamente. Código: {codigo_aut}")
                             st.download_button("⬇️ Baixar autorização", data=texto_aut.encode("utf-8"),
@@ -1041,10 +968,8 @@ def pagina_upload():
                             itens = "; ".join([f"{r.get('codigo') or '-'}|{r.get('procedimento') or '-'}"
                                                for _, r in df_res.iterrows()])
 
-                            st.session_state['auditorias_pendentes'].append({
+                            st.session_state.setdefault('auditorias_pendentes', []).append({
                                 'protocolo': protocolo,
-                                'paciente': paciente or "",
-                                'documento': doc_paciente or "",
                                 'prazo_dias': prazo,
                                 'itens': itens,
                                 'created_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
@@ -1074,7 +999,7 @@ def pagina_upload():
             st.caption("Nenhuma auditoria pendente nesta sessão.")
         else:
             df_pend = pd.DataFrame(pend)
-            st.dataframe(df_pend[['protocolo','paciente','documento','prazo_dias','created_at','itens']], use_container_width=True)
+            st.dataframe(df_pend[['protocolo','prazo_dias','created_at','itens']], use_container_width=True)
             prot_list = [p['protocolo'] for p in pend]
             protocolo_sel = st.selectbox("Escolha um protocolo para aprovar:", prot_list)
             if st.button("Aprovar e Gerar Autorização", use_container_width=True):
@@ -1090,8 +1015,6 @@ def pagina_upload():
                     f"Código: {codigo_aut}",
                     f"Protocolo auditoria: {protocolo_sel}",
                     f"Data: {datetime.now().strftime('%d/%m/%Y %H:%M')}",
-                    f"Paciente: {item.get('paciente') if item else '-'}",
-                    f"Documento: {item.get('documento') if item else '-'}",
                     "\nProcedimentos autorizados:",
                     item.get('itens') if item else "-"
                 ]
@@ -1099,9 +1022,9 @@ def pagina_upload():
                 st.success(f"🎉 Auditoria aprovada. Autorização gerada: {codigo_aut}")
                 st.download_button("⬇️ Baixar autorização", data=texto_aut.encode("utf-8"),
                                    file_name=f"autorizacao_{codigo_aut}.txt", mime="text/plain")
-
-    # --- SUBTAB 3: Banco de Dados (dentro do Upload) ---
-    with up_tabs[2]:
+                
+    # --- SUBTAB 2: Banco de Dados ---
+    with up_tabs[1]:
         st.header("🗄️ Banco de Dados (SQLite)", divider=True)
         init_db()
 
@@ -1125,31 +1048,135 @@ def pagina_upload():
                 with get_conn() as conn:
                     conn.execute("DELETE FROM procedimentos;"); conn.commit()
                 st.success("Tabela procedimentos limpa.")
+        
+# ----------------------------
+# Banco de Dados (SQLite) – NOVAS TABELAS
+# ----------------------------
+def _table_exists(conn, name: str) -> bool:
+    try:
+        cur = conn.execute("SELECT name FROM sqlite_master WHERE type='table' AND name=?;", (name,))
+        return cur.fetchone() is not None
+    except Exception:
+        return False
 
-        st.markdown("### 🔎 Amostra do Banco")
+def _init_extra_tables(conn):
+    # Auditorias
+    conn.execute("""
+    CREATE TABLE IF NOT EXISTS auditorias (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        protocolo TEXT UNIQUE,
+        paciente TEXT,
+        documento TEXT,
+        itens TEXT,            -- string com itens "COD|DESC; COD|DESC"
+        prazo_dias INTEGER,
+        status TEXT,           -- 'pendente' | 'aprovada' | 'negada'
+        motivo_negacao TEXT,
+        created_at TEXT,
+        decided_at TEXT
+    );
+    """)
+    # Autorizações
+    conn.execute("""
+    CREATE TABLE IF NOT EXISTS autorizacoes (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        codigo TEXT UNIQUE,
+        protocolo TEXT,        -- NULL quando foi autorização automática sem auditoria
+        paciente TEXT,
+        documento TEXT,
+        tipo TEXT,             -- 'automatica' | 'apos_auditoria'
+        arquivo_path TEXT,     -- onde salvei o TXT
+        created_at TEXT
+    );
+    """)
+    conn.commit()
 
-        def _table_exists(conn, name: str) -> bool:
-            try:
-                cur = conn.execute("SELECT name FROM sqlite_master WHERE type='table' AND name=?;", (name,))
-                return cur.fetchone() is not None
-            except Exception:
-                return False
+# altere seu init_db() para chamar _init_extra_tables(conn)
+def init_db():
+    with get_conn() as conn:
+        conn.execute("""
+        CREATE TABLE IF NOT EXISTS procedimentos (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            codigo TEXT,
+            procedimento TEXT,
+            auditoria INTEGER,
+            prazo_dias INTEGER,
+            origem_aba TEXT,
+            elegivel INTEGER,
+            UNIQUE(codigo, procedimento)
+        );
+        """)
+        conn.execute("""
+        CREATE TABLE IF NOT EXISTS agendamentos (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            protocolo TEXT,
+            nome TEXT,
+            nascimento TEXT,
+            especialidade TEXT,
+            motivo TEXT,
+            profissional TEXT,
+            calendar_id TEXT,
+            inicio TEXT,
+            fim TEXT,
+            event_id TEXT,
+            event_link TEXT,
+            created_at TEXT
+        );
+        """)
+        conn.commit()
+        _migrate_schema(conn)
+        _init_extra_tables(conn)
 
-        try:
-            with get_conn() as conn:
-                init_db()
-                if _table_exists(conn, "procedimentos"):
-                    df_preview = pd.read_sql_query(
-                        "SELECT codigo, procedimento, auditoria, prazo_dias, elegivel, origem_aba FROM procedimentos LIMIT 50;",
-                        conn
-                    )
-                else:
-                    df_preview = pd.DataFrame(columns=["codigo","procedimento","auditoria","prazo_dias","elegivel","origem_aba"])
-        except Exception:
-            st.info("Banco ainda vazio ou indisponível. Insira a planilha para criar/atualizar os dados.")
-            df_preview = pd.DataFrame(columns=["codigo","procedimento","auditoria","prazo_dias","elegivel","origem_aba"])
+# ----------------------------
+# Persistência: arquivos e registros
+# ----------------------------
+EXPORT_DIR = DB_DIR / "exports"
+EXPORT_DIR.mkdir(parents=True, exist_ok=True)
 
-        st.dataframe(df_preview, use_container_width=True)
+def salvar_arquivo_txt(conteudo: str, nome_arquivo: str) -> str:
+    """Salva TXT no disco e retorna o caminho."""
+    path = EXPORT_DIR / nome_arquivo
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(conteudo)
+    return str(path)
+
+def registrar_auditoria(protocolo: str, paciente: str, documento: str, itens: str, prazo_dias: int):
+    with get_conn() as conn:
+        conn.execute("""
+        INSERT OR IGNORE INTO auditorias
+        (protocolo, paciente, documento, itens, prazo_dias, status, created_at)
+        VALUES (?, ?, ?, ?, ?, 'pendente', ?);
+        """, (protocolo, paciente, documento, itens, prazo_dias, datetime.now().strftime('%Y-%m-%d %H:%M:%S')))
+        conn.commit()
+
+def atualizar_auditoria_status(protocolo: str, status: str, motivo_negacao: str | None = None):
+    with get_conn() as conn:
+        conn.execute("""
+        UPDATE auditorias SET status=?, motivo_negacao=?, decided_at=?
+        WHERE protocolo=?;
+        """, (status, motivo_negacao, datetime.now().strftime('%Y-%m-%d %H:%M:%S'), protocolo))
+        conn.commit()
+
+def registrar_autorizacao(codigo: str, tipo: str, paciente: str, documento: str, arquivo_path: str, protocolo: str | None = None):
+    with get_conn() as conn:
+        conn.execute("""
+        INSERT OR REPLACE INTO autorizacoes
+        (codigo, protocolo, paciente, documento, tipo, arquivo_path, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?);
+        """, (codigo, protocolo, paciente, documento, tipo, arquivo_path, datetime.now().strftime('%Y-%m-%d %H:%M:%S')))
+        conn.commit()
+
+def listar_auditorias_pendentes():
+    with get_conn() as conn:
+        return pd.read_sql_query("""
+        SELECT protocolo, paciente, documento, prazo_dias, created_at, itens
+        FROM auditorias WHERE status='pendente' ORDER BY created_at DESC;
+        """, conn)
+
+def get_auditoria_por_protocolo(protocolo: str):
+    with get_conn() as conn:
+        df = pd.read_sql_query("SELECT * FROM auditorias WHERE protocolo=?;", conn, params=(protocolo,))
+        return df.iloc[0].to_dict() if not df.empty else None
+
 
 # ----------------------------
 # Tab: Chat principal (unificado)
@@ -1182,19 +1209,30 @@ def pagina_chat_unificada():
         st.info("Configure modelos na sidebar e (opcional) salve um arquivo/URL no tab 📎 Upload. Depois clique em **Inicializar Oráculo (Unificado)**.")
         st.stop()
 
- # historico 
+    # 1) Histórico em cima
     memoria = st.session_state.get('memoria', MEMORIA_PADRAO)
     for mensagem in memoria.buffer_as_messages:
         st.chat_message(mensagem.type).markdown(mensagem.content)
 
-    entrada = st.chat_input('Pergunte algo para o Oráculo')
-    if entrada:
+    # 2) >>> Barra de prompt ENTRE o histórico e os botões <<<
+    #    (não usamos mais st.chat_input)
+    with st.container():
+        with st.form("prompt_form", clear_on_submit=True):
+            entrada = st.text_area(
+                "Pergunte algo para o Oráculo",
+                key="prompt_text",
+                placeholder="Pergunte algo para o Oráculo",
+                height=80
+            )
+            enviar = st.form_submit_button("Enviar", use_container_width=True, type="primary")
+
+    if enviar and entrada and entrada.strip():
         st.chat_message('human').markdown(entrada)
         caixa_ai = st.chat_message('ai')
         try:
-            resposta = caixa_ai.write_stream(chain.stream({
-                'input': entrada, 'chat_history': memoria.buffer_as_messages
-            }))
+            resposta = caixa_ai.write_stream(
+                chain.stream({'input': entrada, 'chat_history': memoria.buffer_as_messages})
+            )
         except Exception:
             resp = chain.invoke({'input': entrada, 'chat_history': memoria.buffer_as_messages})
             resposta = getattr(resp, 'content', resp)
@@ -1203,33 +1241,358 @@ def pagina_chat_unificada():
         memoria.chat_memory.add_user_message(entrada)
         memoria.chat_memory.add_ai_message(resposta)
         st.session_state['memoria'] = memoria
+        # opcional: rolar para mostrar a nova resposta (refaz o layout)
+        st.rerun()
 
+    # 3) Botões ficam ABAIXO da barra de prompt
     col1, col2 = st.columns(2)
     with col1:
         if st.button('Apagar histórico de conversa', use_container_width=True):
             st.session_state['memoria'] = ConversationBufferMemory()
             st.success("Histórico apagado.")
+            st.rerun()
     with col2:
         if st.button('Reinicializar Oráculo', use_container_width=True):
             st.session_state.pop('chain_unificada', None)
             st.success("Reinicialize usando o botão acima.")
 
+# =========================
+# TAREFA 3 - AGENDAMENTO (com SQLite)
+# =========================
+import uuid
+import sqlite3
+from datetime import datetime, date, time, timedelta
+import pandas as pd
+import streamlit as st
+
+# ----------------------------
+# Config DB (altere se quiser unificar com seu DB)
+# ----------------------------
+DB_FILE = "hackaton.db"  # use o mesmo arquivo do seu projeto se já existir
+
+def _conn():
+    return sqlite3.connect(DB_FILE, check_same_thread=False)
+
+def _ensure_tables():
+    with _conn() as con:
+        con.execute("""
+        CREATE TABLE IF NOT EXISTS agendamentos (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            protocolo TEXT UNIQUE NOT NULL,
+            medico_id TEXT NOT NULL,
+            nome_medico TEXT NOT NULL,
+            especialidade TEXT NOT NULL,
+            cidade TEXT NOT NULL,
+            data TEXT NOT NULL,   -- YYYY-MM-DD
+            hora TEXT NOT NULL,   -- HH:MM
+            paciente TEXT NOT NULL,
+            documento TEXT,
+            criado_em TEXT NOT NULL,
+            UNIQUE(medico_id, data, hora)  -- bloqueia duplo agendamento
+        );
+        """)
+        con.execute("CREATE INDEX IF NOT EXISTS idx_agenda_med_data ON agendamentos(medico_id, data);")
+
+# ----------------------------
+# "Banco" de médicos simulado (em memória)
+# ----------------------------
+
+def _init_fake_medicos():
+    if "DB_MEDICOS" not in st.session_state:
+        st.session_state.DB_MEDICOS = pd.DataFrame([
+            {
+                "medico_id": "M01",
+                "nome_medico": "Dra. Ana Souza",
+                "especialidade": "Cardiologia",
+                "cidade": "Ribeirão Preto",
+                "dias_semana": [0, 2, 4],  # seg, qua, sex
+                "hora_inicio": time(9, 0),
+                "hora_fim": time(12, 0),
+                "slot_min": 30,
+            },
+            {
+                "medico_id": "M02",
+                "nome_medico": "Dr. Bruno Lima",
+                "especialidade": "Dermatologia",
+                "cidade": "Franca",
+                "dias_semana": [1, 3],     # ter, qui
+                "hora_inicio": time(14, 0),
+                "hora_fim": time(17, 0),
+                "slot_min": 20,
+            },
+            {
+                "medico_id": "M03",
+                "nome_medico": "Dra. Carla Mendes",
+                "especialidade": "Ginecologia",
+                "cidade": "Ribeirão Preto",
+                "dias_semana": [0, 1, 3],  # seg, ter, qui
+                "hora_inicio": time(8, 30),
+                "hora_fim": time(11, 30),
+                "slot_min": 30,
+            },
+            {
+                "medico_id": "M04",
+                "nome_medico": "Dr. Diego Martins",
+                "especialidade": "Ortopedia",
+                "cidade": "São Carlos",
+                "dias_semana": [2, 4],     # qua, sex
+                "hora_inicio": time(9, 0),
+                "hora_fim": time(16, 0),
+                "slot_min": 40,
+            },
+        ])
+
+# ----------------------------
+# Helpers de agenda
+# ----------------------------
+def _time_range(h_ini: time, h_fim: time, slot_min: int):
+    cursor = datetime.combine(date.today(), h_ini)
+    fim = datetime.combine(date.today(), h_fim)
+    out = []
+    while cursor <= fim - timedelta(minutes=slot_min):
+        out.append(cursor.time())
+        cursor += timedelta(minutes=slot_min)
+    return out
+
+def _ocupados_db(medico_id: str, d: date):
+    """Retorna set de horários (time) já ocupados no DB para {medico_id, data}."""
+    with _conn() as con:
+        rows = con.execute(
+            "SELECT hora FROM agendamentos WHERE medico_id=? AND data=?",
+            (medico_id, d.isoformat()),
+        ).fetchall()
+    out = set()
+    for (hstr,) in rows:
+        try:
+            hh, mm = map(int, hstr.split(":")[:2])
+            out.add(time(hh, mm))
+        except Exception:
+            pass
+    return out
+
+def _slots_do_dia(med_row: pd.Series, d: date):
+    """Gera slots livres consultando o DB para bloquear ocupados."""
+    if d.weekday() not in med_row["dias_semana"]:
+        return []
+    base = _time_range(med_row["hora_inicio"], med_row["hora_fim"], int(med_row["slot_min"]))
+    ocupados = _ocupados_db(med_row["medico_id"], d)
+    return [h for h in base if h not in ocupados]
+
+def _dias_com_vaga_no_mes(med_row: pd.Series, start: date, days: int = 30):
+    out = {}
+    for i in range(days + 1):
+        d = start + timedelta(days=i)
+        livres = _slots_do_dia(med_row, d)
+        out[d] = len(livres)
+    return out
+
+def _protocolo():
+    token = uuid.uuid4().hex[:6].upper()
+    return f"AGD-{datetime.now().strftime('%Y%m%d')}-{token}"
+
+def _add_reserva_db(res):
+    """Insere no DB; respeita UNIQUE(medico_id,data,hora). Retorna (ok, msg/protocolo)."""
+    try:
+        with _conn() as con:
+            con.execute("""
+                INSERT INTO agendamentos
+                (protocolo, medico_id, nome_medico, especialidade, cidade,
+                 data, hora, paciente, documento, criado_em)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+                res["protocolo"], res["medico_id"], res["nome_medico"], res["especialidade"], res["cidade"],
+                res["data"].isoformat(), res["hora"].strftime("%H:%M"), res["paciente"], res.get("documento") or "",
+                datetime.now().isoformat(timespec="seconds"),
+            ))
+        return True, res["protocolo"]
+    except sqlite3.IntegrityError as e:
+        # Pode ser conflito no UNIQUE (slot já ocupado) ou protocolo duplicado (raro)
+        return False, "Horário indisponível (acabou de ser preenchido). Atualize e tente outro."
+
+def _list_reservas(documento: str | None = None, protocolo: str | None = None):
+    """Lista agendamentos filtrando por documento ou protocolo (um ou outro)."""
+    q = "SELECT id, protocolo, paciente, nome_medico, especialidade, cidade, data, hora, criado_em FROM agendamentos"
+    params = []
+    if documento:
+        q += " WHERE documento = ?"
+        params.append(documento.strip())
+    elif protocolo:
+        q += " WHERE protocolo = ?"
+        params.append(protocolo.strip())
+    q += " ORDER BY data, hora"
+    with _conn() as con:
+        rows = con.execute(q, params).fetchall()
+    cols = ["id", "protocolo", "paciente", "profissional", "especialidade", "cidade", "data", "hora", "criado_em"]
+    return pd.DataFrame(rows, columns=cols)
+
+def _delete_reserva_by_id(rid: int):
+    with _conn() as con:
+        con.execute("DELETE FROM agendamentos WHERE id = ?", (rid,))
+
+# ----------------------------
+# UI / Página
+# ----------------------------
+def pagina_agendamento():
+    _ensure_tables()
+    _init_fake_medicos()
+
+    st.header("🗓️ Agendamento de Consultas (Uniagende)", divider=True)
+    st.caption("Agende sua consulta em até 30 dias. Confirmação com protocolo e bloqueio automático do horário.")
+
+    medicos_df = st.session_state.DB_MEDICOS
+
+    # ==== FILTROS ====
+    f1, f2, f3 = st.columns([1, 1, 1.3])
+    with f1:
+        esp_list = ["(todas)"] + sorted(medicos_df["especialidade"].unique().tolist())
+        especialidade = st.selectbox("Especialidade", esp_list, index=0)
+    with f2:
+        df1 = medicos_df if especialidade == "(todas)" else medicos_df[medicos_df["especialidade"] == especialidade]
+        cidades_list = ["(todas)"] + sorted(df1["cidade"].unique().tolist())
+        cidade = st.selectbox("Cidade", cidades_list, index=0)
+    with f3:
+        df2 = df1 if cidade == "(todas)" else df1[df1["cidade"] == cidade]
+        if df2.empty:
+            st.warning("Não há médicos para os filtros selecionados.")
+            return
+        nomes = df2["nome_medico"] + " — " + df2["especialidade"] + " (" + df2["cidade"] + ")"
+        escolha = st.selectbox("Profissional", nomes.tolist(), index=0)
+        med_row = df2.iloc[nomes.tolist().index(escolha)]
+
+    st.divider()
+
+    # ==== CALENDÁRIO + SELETOR DE DATA ====
+    hoje = date.today()
+    limite = hoje + timedelta(days=30)
+    dias_vagas = _dias_com_vaga_no_mes(med_row, hoje, days=(limite - hoje).days)
+
+    c1, c2, c3 = st.columns(3)
+    with c1: st.markdown("**Legenda:**")
+    with c2: st.markdown("🟢 **Vagas**")
+    with c3: st.markdown("🔴 **Lotado / não atende**")
+
+    cal_col, pick_col = st.columns([1.2, 1])
+    with cal_col:
+        vis = []
+        for d, qtd in dias_vagas.items():
+            if hoje <= d <= limite:
+                vis.append({
+                    "Data": d.strftime("%d/%m/%Y"),
+                    "Dia da semana": ["Seg", "Ter", "Qua", "Qui", "Sex", "Sáb", "Dom"][d.weekday()],
+                    "Status": "🟢 {} horário(s)".format(qtd) if qtd > 0 else "🔴 Indisponível"
+                })
+        st.dataframe(pd.DataFrame(vis), use_container_width=True, hide_index=True)
+
+    with pick_col:
+        data_escolhida = st.date_input(
+            "Selecione a data (até 30 dias)",
+            value=hoje,
+            min_value=hoje,
+            max_value=limite,
+            format="DD/MM/YYYY",
+        )
+        slots = _slots_do_dia(med_row, data_escolhida)
+        if not slots:
+            st.info("Este dia está **indisponível ou sem vagas** para o profissional selecionado.")
+        else:
+            st.success(f"Há **{len(slots)}** horário(s) em {data_escolhida.strftime('%d/%m/%Y')}.")
+
+    st.divider()
+
+    # ==== AGENDAR (bloqueia no DB) ====
+    st.subheader("Horários disponíveis", divider=True)
+    if slots:
+        with st.expander("Dados do paciente"):
+            nome_paciente = st.text_input("Nome completo", key="ag_nome", placeholder="Seu nome")
+            doc_paciente = st.text_input("Documento (CPF/RG) — use o mesmo para listar/cancelar", key="ag_doc", placeholder="Ex.: 123.456.789-00")
+
+        cols = st.columns(4)
+        agendou = False
+        for i, h in enumerate(slots):
+            label = h.strftime("%H:%M")
+            if cols[i % 4].button(label, key=f"btn_{label}"):
+                if not nome_paciente.strip():
+                    st.warning("Informe o **Nome completo**.")
+                else:
+                    reserva = {
+                        "protocolo": _protocolo(),
+                        "medico_id": med_row["medico_id"],
+                        "nome_medico": med_row["nome_medico"],
+                        "especialidade": med_row["especialidade"],
+                        "cidade": med_row["cidade"],
+                        "data": data_escolhida,
+                        "hora": h,
+                        "paciente": nome_paciente.strip(),
+                        "documento": doc_paciente.strip(),
+                    }
+                    ok, msg = _add_reserva_db(reserva)
+                    if ok:
+                        st.success(f"✅ Consulta confirmada: **{data_escolhida.strftime('%d/%m/%Y')} às {label}**, "
+                                   f"com **{med_row['nome_medico']}** ({med_row['especialidade']}, {med_row['cidade']}).")
+                        st.info(f"🧾 **Protocolo:** `{msg}` — guarde este número.")
+                        agendou = True
+                    else:
+                        st.error(msg)
+
+        if agendou:
+            st.rerun()
+    else:
+        if not any(qtd > 0 for qtd in dias_vagas.values()):
+            st.error("No período de **1 mês** não há vagas para o profissional selecionado.")
+
+    st.divider()
+
+    # ==== MEUS AGENDAMENTOS (listar + excluir) ====
+    st.subheader("Meus agendamentos", divider=True)
+    fdoc, fprot = st.columns([1, 1])
+    with fdoc:
+        filtro_doc = st.text_input("Filtrar pelo meu Documento (CPF/RG)", key="flt_doc")
+    with fprot:
+        filtro_prot = st.text_input("…ou pelo Protocolo", key="flt_prot")
+
+    df_meus = _list_reservas(documento=filtro_doc.strip() or None,
+                              protocolo=filtro_prot.strip() or None)
+
+    if df_meus.empty:
+        st.caption("Nenhum agendamento encontrado para os filtros informados.")
+    else:
+        # Render de cartões com botão de cancelar
+        for _, row in df_meus.iterrows():
+            with st.container(border=True):
+                st.markdown(
+                    f"**{row['profissional']}** — {row['especialidade']} ({row['cidade']})  \n"
+                    f"🗓️ {row['data']} às {row['hora']}  \n"
+                    f"👤 {row['paciente']}  \n"
+                    f"🧾 Protocolo: `{row['protocolo']}`"
+                )
+                cdel, csp = st.columns([0.3, 0.7])
+                with cdel:
+                    if st.button("🗑️ Cancelar", key=f"del_{int(row['id'])}"):
+                        _delete_reserva_by_id(int(row["id"]))
+                        st.success("Agendamento cancelado.")
+                        st.rerun()
+
 # ----------------------------
 # main
 # ----------------------------
+# se estiver em outro arquivo:
+# from agendamento import pagina_agendamento
+
+# from agendamento import pagina_agendamento  # se estiver em arquivo separado
+
 def main():
-    # garante que a tabela exista antes de qualquer SELECT
-    init_db()
+    init_db()  # mantém o que você já fazia
 
     with st.sidebar:
         sidebar_modelos()
 
-    # Duas tabs: Chat e Upload (Banco está dentro do Upload)
-    t_chat, t_upload = st.tabs(["💬 Chat", "📎 Upload"])
+    t_chat, t_upload, t_agenda = st.tabs(["💬 Chat", "📎 Upload", "🗓️ Agendamento"])
     with t_chat:
         pagina_chat_unificada()
     with t_upload:
         pagina_upload()
+    with t_agenda:
+        pagina_agendamento()   # PRONTO: com DB e cancelamento
 
 if __name__ == '__main__':
     main()

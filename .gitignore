@@ -1,25 +1,47 @@
-# Ignorar ambiente virtual
+# ----------------------
+# Ambiente virtual Python
+# ----------------------
 .venv/
+env/
 venv/
 
-# Arquivos de cache do Python
+# ----------------------
+# Cache / Compilados
+# ----------------------
 _pycache_/
 *.pyc
 *.pyo
 *.pyd
+*.pkl
 
-# Arquivos com chaves da API
+# ----------------------
+# Configurações locais
+# ----------------------
 .streamlit/
+*.toml
+*.secrets.toml
 
-# Arquivos temporários de build
-*.log
+# ----------------------
+# Banco de dados e dados locais
+# ----------------------
+*.db
 *.sqlite3
+data/
+!data/exports/           # se quiser manter só os txt de exportação
 
-# Configurações de IDEs/editors
-.vscode/
-.idea/
-*.code-workspace
+# ----------------------
+# Arquivos sensíveis
+# ----------------------
+client_secret.json
+token.json
 
-# Arquivos do sistema
-.DS_Store
+# ----------------------
+# Logs e temporários
+# ----------------------
+*.log
+*.tmp
+*.temp
+*.bak
+*.swp
+*.DS_Store
 Thumbs.db
