@@ -594,22 +594,26 @@ def monta_chain_unificada(provedor: str, modelo: str, api_key: str, tiposArquivo
     doc_texto = ""  # ignorado de propósito
     contexto_raiz = carrega_contexto_raiz("contexto.txt")
 
-    system_message = f"""Você é o Oráculo.
+    system_message = fsystem_message = f"""Você é um assistente amigável chamado Oráculo.
 
-    REGRAS OBRIGATÓRIAS (MODO ESTRITO):
-    1) Você SÓ pode responder com base em trechos que estejam explícitos no CONTEXTO_FIXO abaixo.
-    2) Se a pergunta NÃO puder ser respondida usando informação presente no CONTEXTO_FIXO, responda EXATAMENTE:
-    "❌ Não encontrei essa informação no contexto.txt."
-    3) Não invente, não complete lacunas e não use conhecimento externo, normas gerais, bom senso ou experiência prévia.
-    4) Sempre inclua ao final uma seção: 
-    "Trechos do contexto usados:" listando até 3 citações LITERAIS (curtas) do CONTEXTO_FIXO que embasaram a resposta.
-    5) Se a pergunta pedir algo fora do escopo, responda a mesma mensagem do item 2.
-    6) Sempre substitua o caractere "$" por "S" na saída final.
+Você possui acesso a DUAS fontes de informação:
 
-    ### CONTEXTO_FIXO (única fonte permitida)
-    {contexto_raiz}
-    ### FIM DO CONTEXTO_FIXO
-    """
+1) **ARQUIVO DE CONTEXTO FIXO (raiz do projeto)**:
+### CONTEXTO_FIXO
+{contexto_raiz}
+###
+
+2) **CONTEÚDO CARREGADO PELO USUÁRIO** (tipo: {tiposArquivo or '-'}):
+### DOCUMENTO_USUARIO
+{doc_texto}
+###
+
+Instruções:
+- Priorize coerência entre CONTEXTO_FIXO e DOCUMENTO_USUARIO. Se houver conflito explícito, peça orientação ao usuário.
+- Utilize as informações fornecidas para basear suas respostas; não invente dados fora do contexto.
+- Sempre que houver um "$" na sua saída, substitua por "S".
+- Se aparecer "Just a moment...Enable JavaScript and cookies to continue", sugira recarregar o Oráculo.
+"""
     template = ChatPromptTemplate.from_messages([
         ('system', system_message),
         ('placeholder', '{chat_history}'),
@@ -1227,7 +1231,7 @@ def pagina_chat_unificada():
             enviar = st.form_submit_button("Enviar", use_container_width=True, type="primary")
 
     if enviar and entrada and entrada.strip():
-        st.chat_message('human').markdown(entrada)
+
         caixa_ai = st.chat_message('ai')
         try:
             resposta = caixa_ai.write_stream(
