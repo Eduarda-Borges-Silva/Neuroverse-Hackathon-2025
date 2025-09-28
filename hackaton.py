@@ -1196,7 +1196,7 @@ def pagina_chat_unificada():
     with colB: st.write(f"**Modelo:** {sel['modelo'] if sel else '-'}")
     with colC: st.write(f"**Entrada salva:** {up.get('tipo') or '-'} {'✅' if up.get('arquivo') else '—'}")
 
-    if st.button('Inicializar Oráculo (Unificado)', use_container_width=True):
+    if st.button('Inicializar Oráculo', use_container_width=True):
         if not sel:
             st.error("Selecione um provedor/modelo na sidebar.")
         elif not sel.get('api_key'):
